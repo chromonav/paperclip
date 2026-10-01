@@ -1106,6 +1106,21 @@ agent, message, and successor run; the operator need not be the message author.
 Repeated delivery attempts cannot create another successor after the queue
 is consumed. Native same-turn steering retains its active-target contract.
 
+Explicit receipt consumption and successor admission commit together, including
+Agent Chat, where generic conversation coalescing remains disabled. Editing a
+queued successor narrows the linked interrupt receipt's message IDs as well.
+Discarding its final message cancels both wakes and the still-queued run; this
+also resolves an older unbound receipt's exact queued successor. Discard never
+creates a consumed authorization receipt.
+
+A queued interrupt with invalid authority is rejected before provider startup
+when it has no start, process, or controller ownership evidence. The transaction
+cancels the run with `queued_comment_interrupt_authority_unavailable`, skips its
+wake and any matching unconsumed intent, clears only its own task execution lock,
+and records a warning in the run log. Other eligible candidates and subsequent
+recovery passes can proceed. Already-started or provider-owned work is not
+automatically cancelled by this path, and unrelated errors still propagate.
+
 Legacy finalization retries deferred input after adapter and lease cleanup.
 The scheduler also revisits bounded batches of stranded queues after restart
 or a late enqueue. Both use normal admission; an existing queued successor

@@ -34,7 +34,9 @@ export async function explicitOperatorRunIdentity(
   // The key only locates a candidate. The consumed queue, actor, run, company,
   // agent, task, and delivered messages must all independently agree.
   if (!isUuidLike(queueId)) {
-    throw forbidden("Queued-message interrupt authority is unavailable");
+    throw forbidden("Queued-message interrupt authority is unavailable", {
+      code: "queued_comment_interrupt_authority_unavailable",
+    });
   }
   const [receipt] = await executor.select().from(agentWakeupRequests).where(and(
     eq(agentWakeupRequests.id, queueId), eq(agentWakeupRequests.companyId, run.companyId),
@@ -49,7 +51,9 @@ export async function explicitOperatorRunIdentity(
       receipt?.payload?.issueId !== run.contextSnapshot?.issueId ||
       !ids.every(id => deliveredIds.includes(id)) ||
       request.requestedByActorType !== "user" || request.requestedByActorId !== actorId) {
-    throw forbidden("Queued-message interrupt authority is unavailable");
+    throw forbidden("Queued-message interrupt authority is unavailable", {
+      code: "queued_comment_interrupt_authority_unavailable",
+    });
   }
   return { actorId, cause: "queued_comment_interrupt" };
 }

@@ -1,7 +1,8 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, agents, heartbeatRuns, issueComments, issues } from "@paperclipai/db";
 import type { IssueComment, IssueQueuedCommentQueue } from "@paperclipai/shared";
+import { isUuidLike } from "@paperclipai/shared";
 import {
   buildQueuedCommentQueueSnapshot,
   decideQueuedCommentQueueSteering,
@@ -43,7 +44,7 @@ export type QueuedCommentQueuePostgresAdapterDeps = {
   syncCommentExternalObjectsSafely(commentId: string, tx: Db): Promise<void>;
 };
 
-function buildTransaction(tx: Db, companyId: string, deps: QueuedCommentQueuePostgresAdapterDeps): QueuedCommentQueueTransaction {
+function buildTransaction(tx: Db, companyId: string, deps: QueuedCommentQueuePostgresAdapterDeps, linkedWake: WakeRow | null): QueuedCommentQueueTransaction {
   return {
     async updateCommentBody({ issueId, commentId, body, updatedAt }) {
       const updated = await tx
@@ -66,6 +67,16 @@ function buildTransaction(tx: Db, companyId: string, deps: QueuedCommentQueuePos
         .where(and(eq(agentWakeupRequests.id, wakeId), eq(agentWakeupRequests.companyId, companyId)))
         .returning()
         .then((rows) => rows[0]);
+      if (linkedWake) {
+        // Narrow the original authorization; never add IDs or manufacture a
+        // consumed receipt while editing its queued successor.
+        const linkedIds = queuedCommentIdsFromWakePayload(linkedWake.payload);
+        await tx.update(agentWakeupRequests).set({
+          payload: withQueuedCommentIdsInWakePayload(linkedWake.payload, ids.filter((id) => linkedIds.includes(id))),
+          updatedAt,
+        }).where(and(eq(agentWakeupRequests.id, linkedWake.id), eq(agentWakeupRequests.companyId, companyId),
+          eq(agentWakeupRequests.status, linkedWake.status)));
+      }
       return toWakeRow(row);
     },
 
@@ -93,6 +104,11 @@ function buildTransaction(tx: Db, companyId: string, deps: QueuedCommentQueuePos
         .update(agentWakeupRequests)
         .set({ status: "cancelled", finishedAt: now, error: reason, updatedAt: now })
         .where(and(eq(agentWakeupRequests.id, wakeId), eq(agentWakeupRequests.companyId, companyId)));
+      if (linkedWake) {
+        await tx.update(agentWakeupRequests).set({ status: "cancelled", finishedAt: now, error: reason, updatedAt: now })
+          .where(and(eq(agentWakeupRequests.id, linkedWake.id), eq(agentWakeupRequests.companyId, companyId),
+            eq(agentWakeupRequests.status, linkedWake.status)));
+      }
     },
 
     async cancelQueueRun({ queueRunId, reason, now }) {
@@ -248,34 +264,64 @@ export function createQueuedCommentIssueLockWriter(db: Db, deps: QueuedCommentQu
         // Unreachable: `decideQueuedCommentWakeLookup` only returns "deferred" or "check_queue_run" when the wake row is present.
         if (!wakeRow) throw new Error("wake-queue: queued-comment lookup resolved without a wake row");
 
+        // The interrupt's source receipt and delivery wake are distinct rows.
+        // Lock both under the task lock before touching either one or the run.
+        const interruptPrefix = "queued-comment-interrupt:";
+        let linkedWakeRow: WakeRow | null = null;
+        let runWake = wakeRow;
+        if (lookup.kind === "deferred" && wakePayload.queuedCommentInterrupt) {
+          // Older admissions could leave the original receipt unbound. Its
+          // exact successor still belongs to the discard; never revive it.
+          linkedWakeRow = await tx.select().from(agentWakeupRequests).where(and(
+            eq(agentWakeupRequests.companyId, companyId),
+            eq(agentWakeupRequests.agentId, wakeRow.agentId),
+            eq(agentWakeupRequests.idempotencyKey, `${interruptPrefix}${wakeRow.id}`),
+            sql`${agentWakeupRequests.payload}->>'issueId' = ${input.issue.id}`,
+            inArray(agentWakeupRequests.status, ["queued", "claimed"]),
+          )).for("update").limit(1).then((rows) => rows[0] ?? null);
+          if (linkedWakeRow) runWake = linkedWakeRow;
+        } else if (lookup.kind === "check_queue_run" && wakeRow.idempotencyKey?.startsWith(interruptPrefix)) {
+          const receiptId = wakeRow.idempotencyKey.slice(interruptPrefix.length);
+          if (isUuidLike(receiptId)) {
+            linkedWakeRow = await tx.select().from(agentWakeupRequests).where(and(
+              eq(agentWakeupRequests.id, receiptId), eq(agentWakeupRequests.companyId, companyId),
+              eq(agentWakeupRequests.agentId, wakeRow.agentId), eq(agentWakeupRequests.runId, wakeRow.runId!),
+              eq(agentWakeupRequests.status, "coalesced"),
+              sql`${agentWakeupRequests.payload}->>'issueId' = ${input.issue.id}`,
+            )).for("update").limit(1).then((rows) => rows[0] ?? null);
+          }
+        }
+
         let state: "deferred" | "queued";
         let queueRunRow: RunRow | null = null;
 
-        if (lookup.kind === "deferred") {
+        if (lookup.kind === "deferred" && !linkedWakeRow) {
           state = "deferred";
         } else {
-          // check_queue_run: `wakeHasRunId` was true for this branch to have been reached.
+          // Resolve only the exact delivery wake's still-queued successor.
           queueRunRow = await tx
             .select()
             .from(heartbeatRuns)
             .where(
               and(
-                eq(heartbeatRuns.id, wakeRow.runId!),
+                eq(heartbeatRuns.id, runWake.runId!),
                 eq(heartbeatRuns.companyId, companyId),
-                eq(heartbeatRuns.agentId, wakeRow.agentId),
-                eq(heartbeatRuns.wakeupRequestId, wakeRow.id),
+                eq(heartbeatRuns.agentId, runWake.agentId),
+                eq(heartbeatRuns.wakeupRequestId, runWake.id),
+                linkedWakeRow ? sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${input.issue.id}` : undefined,
               ),
             )
             .for("update")
             .limit(1)
             .then((rows) => rows[0] ?? null);
-          if (!queueRunRow || queueRunRow.status !== "queued") {
+          if (!queueRunRow || queueRunRow.status !== "queued" || runWake.status !== "queued" ||
+              (lookup.kind === "deferred" && (queueRunRow.runtimeMode !== "legacy" || queueRunRow.startedAt || queueRunRow.processPid))) {
             throw new QueuedCommentMutationError(
               "queued_comment_already_dispatching",
               "The queued message is already being dispatched",
             );
           }
-          state = "queued";
+          state = lookup.kind === "deferred" ? "deferred" : "queued";
         }
 
         const activeRunId = state === "deferred" ? input.issue.executionRunId : null;
@@ -289,7 +335,7 @@ export function createQueuedCommentIssueLockWriter(db: Db, deps: QueuedCommentQu
               .then((rows) => rows[0] ?? null)
           : null;
 
-        const transaction = buildTransaction(tx, companyId, deps);
+        const transaction = buildTransaction(tx, companyId, deps, linkedWakeRow);
         const wake = toWakeRow(wakeRow);
         const queueRun = queueRunRow ? toRunRow(queueRunRow) : null;
         const activeRun = activeRunRow ? toRunRow(activeRunRow) : null;

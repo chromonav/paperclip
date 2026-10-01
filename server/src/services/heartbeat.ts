@@ -17041,6 +17041,86 @@ export function heartbeatService(
     }
   }
 
+  function isQueuedCommentAuthorityError(error: unknown): error is HttpError {
+    return error instanceof HttpError && error.status === 403 &&
+      parseObject(error.details).code === "queued_comment_interrupt_authority_unavailable";
+  }
+
+  async function rejectInvalidQueuedCommentInterrupt(run: typeof heartbeatRuns.$inferSelect, issueId: string | null) {
+    const result = await db.transaction(async (tx) => {
+      // Match admission/discard ordering. Recheck current authority under locks;
+      // a stale scan must not cancel an edited, claimed, or provider-owned run.
+      if (issueId) await tx.execute(
+        sql`select id from ${issues} where ${issues.id} = ${issueId} and ${issues.companyId} = ${run.companyId} for update`,
+      );
+      const wake = run.wakeupRequestId ? await tx.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.id, run.wakeupRequestId), eq(agentWakeupRequests.companyId, run.companyId),
+        eq(agentWakeupRequests.agentId, run.agentId), eq(agentWakeupRequests.runId, run.id),
+      )).for("update").then((rows) => rows[0] ?? null) : null;
+      const prefix = "queued-comment-interrupt:";
+      if (!wake?.idempotencyKey?.startsWith(prefix)) return { kind: "stale" as const };
+      const receiptId = wake.idempotencyKey.slice(prefix.length);
+      const receipt = isUuidLike(receiptId) ? await tx.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.id, receiptId), eq(agentWakeupRequests.companyId, run.companyId),
+        eq(agentWakeupRequests.agentId, run.agentId),
+      )).for("update").then((rows) => rows[0] ?? null) : null;
+      const current = await tx.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.agentId, run.agentId),
+      )).for("update").then((rows) => rows[0] ?? null);
+      if (!current || current.status !== "queued" || current.wakeupRequestId !== wake.id ||
+          readNonEmptyString(current.contextSnapshot?.issueId) !== issueId) return { kind: "stale" as const };
+      if (current.startedAt || current.processPid || current.processGroupId || current.processStartedAt ||
+          current.controllerBootId || current.controllerLeaseExpiresAt || current.runnerInstanceId ||
+          current.nativeSessionId || isNativeRunnerOwnershipHeld(current)) return { kind: "unsafe" as const };
+      try {
+        await explicitOperatorRunIdentity(tx, current);
+        return { kind: "stale" as const };
+      } catch (error) {
+        if (!isQueuedCommentAuthorityError(error)) throw error;
+      }
+      const now = new Date();
+      const errorCode = "queued_comment_interrupt_authority_unavailable";
+      const reason = "Queued-message interrupt rejected before dispatch because its authorization receipt is unavailable or does not match.";
+      const [rejected] = await tx.update(heartbeatRuns).set({
+        status: "cancelled", error: reason, errorCode, finishedAt: now, updatedAt: now,
+        executionStatusDeliveryId: randomUUID(),
+        resultJson: { ...current.resultJson, executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
+      }).where(and(eq(heartbeatRuns.id, current.id), eq(heartbeatRuns.status, "queued"))).returning();
+      await tx.update(agentWakeupRequests).set({ status: "skipped", error: reason, finishedAt: now, updatedAt: now })
+        .where(and(eq(agentWakeupRequests.id, wake.id), eq(agentWakeupRequests.runId, current.id)));
+      // Quarantine only this unconsumed intent so saved-comment recovery cannot
+      // recreate it. Never adopt a cancelled receipt or alter another run's receipt.
+      if (receipt?.status === "deferred_issue_execution" && receipt.runId === null &&
+          receipt.payload?.issueId === issueId && wake.requestedByActorType === "user" &&
+          parseObject(receipt.payload?.queuedCommentInterrupt).actorId === wake.requestedByActorId) {
+        await tx.update(agentWakeupRequests).set({ status: "skipped", error: reason, finishedAt: now, updatedAt: now })
+          .where(and(eq(agentWakeupRequests.id, receipt.id), eq(agentWakeupRequests.status, "deferred_issue_execution"),
+            isNull(agentWakeupRequests.runId)));
+      }
+      if (issueId) await tx.update(issues).set({
+        executionRunId: null,
+        executionAgentNameKey: null,
+        executionLockedAt: null,
+        updatedAt: now,
+      }).where(and(
+        eq(issues.id, issueId), eq(issues.companyId, run.companyId), eq(issues.executionRunId, current.id),
+      ));
+      await appendHeartbeatRunEvent(tx as unknown as Db, {
+        companyId: current.companyId, runId: current.id, agentId: current.agentId,
+        eventType: "lifecycle", stream: "system", level: "warn", message: reason,
+        payload: { errorCode, issueId, wakeupRequestId: wake.id, providerWorkStarted: false },
+      });
+      return { kind: "rejected" as const, run: rejected };
+    });
+    if (result.kind === "rejected") {
+      publishLiveEvent({ companyId: result.run.companyId, type: "heartbeat.run.status",
+        payload: buildHeartbeatRunStatusLiveEventPayload(result.run) });
+      publishRunLifecyclePluginEvent(result.run);
+      emitTerminalAgentTaskRun(result.run, "queued");
+    }
+    return result.kind;
+  }
+
   async function claimQueuedRun(
     run: typeof heartbeatRuns.$inferSelect,
     companyAgents?: AgentOrgRow[],
@@ -17180,18 +17260,19 @@ export function heartbeatService(
     }
 
     const claimedAt = new Date();
-    const responsibleUserId = await resolveResponsibleUserIdForRun({
-      run,
-      contextSnapshot: context,
-      issueContext: issueId
-        ? await getIssueExecutionContext(run.companyId, issueId)
-        : null,
-      routineEnvContext: {
-        routineId: null,
-        env: null,
-        responsibleUserId: null,
-      },
-    });
+    let responsibleUserId: string;
+    try {
+      responsibleUserId = await resolveResponsibleUserIdForRun({
+        run,
+        contextSnapshot: context,
+        issueContext: issueId ? await getIssueExecutionContext(run.companyId, issueId) : null,
+        routineEnvContext: { routineId: null, env: null, responsibleUserId: null },
+      });
+    } catch (error) {
+      if (!isQueuedCommentAuthorityError(error)) throw error;
+      if (await rejectInvalidQueuedCommentInterrupt(run, issueId) === "unsafe") throw error;
+      return null;
+    }
     const queuedCommentIds = queuedCommentIdsFromRunContext(context);
     if (
       issueId &&
@@ -26247,6 +26328,7 @@ export function heartbeatService(
             sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
           );
 
+          let explicitCommentReceipt: typeof agentWakeupRequests.$inferSelect | null = null;
           if (executionWaitRequestId) {
             const [pending] = await tx.select().from(agentWakeupRequests).where(and(
               eq(agentWakeupRequests.id, executionWaitRequestId), eq(agentWakeupRequests.companyId, agent.companyId),
@@ -26287,6 +26369,7 @@ export function heartbeatService(
               operatorResponsibleUserId = opts.requestedByActorId!;
             }
             if (opts.queuedCommentInterruptId || opts.queuedCommentRequestId) {
+              explicitCommentReceipt = pending;
               // Edits/discards between the click and dispatch remain authoritative.
               Object.assign(enrichedContextSnapshot, withQueuedCommentIdsInRunContext(
                 enrichedContextSnapshot, queuedCommentIdsFromWakePayload(pending.payload),
@@ -27493,6 +27576,7 @@ export function heartbeatService(
               : [];
           const adoptedComments = pendingComments.filter((wake) => {
             if (wake.id === opts.queuedCommentInterruptId || wake.id === opts.queuedCommentRequestId) return true;
+            if (opts.queuedCommentInterruptId) return false;
             const deferredPayload = parseObject(wake.payload);
             const deferredContext = parseObject(
               deferredPayload[DEFERRED_WAKE_CONTEXT_KEY],
@@ -27509,6 +27593,11 @@ export function heartbeatService(
               queuedCommentIdsFromWakePayload(wake.payload).length > 0
             );
           });
+          // An explicit continuation must consume its own validated authority
+          // even when generic coalescing is disabled (notably for Agent Chat).
+          if (explicitCommentReceipt && !adoptedComments.some((wake) => wake.id === explicitCommentReceipt?.id)) {
+            adoptedComments.unshift(explicitCommentReceipt);
+          }
           let adoptedCommentIds = [
             ...new Set([
               ...adoptedComments.flatMap((wake) =>
