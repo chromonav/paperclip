@@ -17097,7 +17097,12 @@ export function heartbeatService(
           .where(and(eq(agentWakeupRequests.id, receipt.id), eq(agentWakeupRequests.status, "deferred_issue_execution"),
             isNull(agentWakeupRequests.runId)));
       }
-      if (issueId) await tx.update(issues).set({ executionRunId: null, updatedAt: now }).where(and(
+      if (issueId) await tx.update(issues).set({
+        executionRunId: null,
+        executionAgentNameKey: null,
+        executionLockedAt: null,
+        updatedAt: now,
+      }).where(and(
         eq(issues.id, issueId), eq(issues.companyId, run.companyId), eq(issues.executionRunId, current.id),
       ));
       await appendHeartbeatRunEvent(tx as unknown as Db, {
@@ -27571,6 +27576,7 @@ export function heartbeatService(
               : [];
           const adoptedComments = pendingComments.filter((wake) => {
             if (wake.id === opts.queuedCommentInterruptId || wake.id === opts.queuedCommentRequestId) return true;
+            if (opts.queuedCommentInterruptId) return false;
             const deferredPayload = parseObject(wake.payload);
             const deferredContext = parseObject(
               deferredPayload[DEFERRED_WAKE_CONTEXT_KEY],
