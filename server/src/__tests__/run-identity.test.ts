@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { agentWakeupRequests, agents, companies, createDb, heartbeatRuns, heartbeatRunEvents, issueComments, issueThreadInteractions, issues } from "@paperclipai/db";
+import { EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { acceptSteeredIdentity, captureRunIdentity, initializeRunIdentity, listRunIdentityContexts, rejectSteeredIdentity, reserveSteeredIdentity } from "../services/run-identity.js";
 
@@ -12,7 +13,7 @@ const support = await getEmbeddedPostgresTestSupport();
   beforeAll(async () => {
     database = await startEmbeddedPostgresTestDatabase("paperclip-run-identity-");
     db = createDb(database.connectionString);
-  }, 30_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
   afterAll(async () => { await database?.cleanup(); }, 60_000);
 
   async function seed() {
@@ -79,7 +80,7 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(retried.responsibleUserId).toBe("operator");
   });
 
-  it.each(["malformed", "missing", "unconsumed", "other-run", "other-task", "other-agent", "other-actor", "other-message"])(
+  it.each(["malformed", "missing", "unconsumed", "cancelled", "other-run", "other-task", "other-company", "other-agent", "other-actor", "other-message"])(
     "rejects %s interrupt authority before creating any execution identity", async (fault) => {
       const input = await seedInterrupt();
       if (fault === "malformed" || fault === "missing") {
@@ -90,18 +91,25 @@ const support = await getEmbeddedPostgresTestSupport();
         await db.update(agentWakeupRequests).set({ requestedByActorId: "someone-else" }).where(eq(agentWakeupRequests.id, input.wakeupRequestId));
       } else {
         const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, input.queueId));
-        if (fault === "other-agent") {
+        if (fault === "other-company") {
+          const companyId = randomUUID();
+          await db.insert(companies).values({ id: companyId, name: "Other company", issuePrefix: companyId.slice(0, 8) });
+          await db.update(agentWakeupRequests).set({ companyId }).where(eq(agentWakeupRequests.id, input.queueId));
+        } else if (fault === "other-agent") {
           const agentId = randomUUID();
           await db.insert(agents).values({ id: agentId, companyId: input.companyId, name: "Other", role: "engineer" });
           await db.update(agentWakeupRequests).set({ agentId }).where(eq(agentWakeupRequests.id, input.queueId));
         } else await db.update(agentWakeupRequests).set(
           fault === "unconsumed" ? { status: "deferred_issue_execution" } :
+          fault === "cancelled" ? { status: "cancelled" } :
           fault === "other-run" ? { runId: null } :
           { payload: { ...receipt.payload, ...(fault === "other-task" ? { issueId: randomUUID() } :
             { _paperclipWakeContext: { wakeCommentIds: [randomUUID()] } }) } },
         ).where(eq(agentWakeupRequests.id, input.queueId));
       }
-      await expect(initializeRunIdentity(db, { ...input, responsibleUserId: "A", cause: "dispatch" })).rejects.toThrow("interrupt authority");
+      await expect(initializeRunIdentity(db, { ...input, responsibleUserId: "A", cause: "dispatch" })).rejects.toMatchObject({
+        status: 403, details: { code: "queued_comment_interrupt_authority_unavailable" },
+      });
       expect(await listRunIdentityContexts(db, input.companyId, input.runId)).toHaveLength(0);
     },
   );
