@@ -34,6 +34,102 @@ function probeResult(overrides: Record<string, unknown>) {
   } as never;
 }
 
+describe("OpenCode wake images", () => {
+  const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]);
+  let root: string;
+  let command: string;
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-images-test-"));
+    command = path.join(root, "opencode");
+    await fs.writeFile(command, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    vi.stubEnv("XDG_CONFIG_HOME", path.join(root, "config"));
+    vi.stubEnv("PAPERCLIP_API_URL", "http://127.0.0.1:3100/api");
+    runProcessMock.mockReset();
+    runProcessMock.mockResolvedValue(probeResult({}));
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = originalFetch;
+    vi.unstubAllEnvs();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const descriptor = { id, contentPath: `/api/attachments/${id}/content`, contentType: "image/png", byteSize: png.length };
+  const wake = (attachment: Record<string, unknown>) => ({ comments: [{ id: "comment", body: "look", attachments: [attachment] }] });
+  const executeImage = (attachment: Record<string, unknown>, onMeta?: (meta: unknown) => Promise<void>) => execute({
+    runId: "image-run",
+    agent: { id: "agent", companyId: "company", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+    runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+    config: { command, cwd: root, model: "openai/gpt-5", env: { OPENCODE_ALLOW_ALL_MODELS: "1", PAPERCLIP_API_URL: "http://127.0.0.1:3100/api" } },
+    context: { paperclipWake: wake(attachment) }, authToken: "private-token", onLog: async () => {}, onMeta,
+  });
+
+  it("downloads bytes with bearer auth and supplies a private --file cleaned after execution", async () => {
+    const seen: string[] = [];
+    globalThis.fetch = vi.fn(async (url, options) => {
+      expect(String(url)).toBe(`http://127.0.0.1:3100/api/attachments/${id}/content`);
+      expect(options?.headers).toEqual({ Authorization: "Bearer private-token" });
+      expect(options?.redirect).toBe("error");
+      return new Response(png, { headers: { "content-type": "image/png" } });
+    }) as typeof fetch;
+    runProcessMock.mockImplementation(async (_run, _target, _command, args) => {
+      const file = args[args.indexOf("--file") + 1];
+      expect(await fs.readFile(file)).toEqual(png);
+      expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
+      expect((await fs.stat(path.dirname(file))).mode & 0o777).toBe(0o700);
+      seen.push(file);
+      return probeResult({});
+    });
+    const metadata: unknown[] = [];
+    await executeImage(descriptor, async (meta) => { metadata.push(meta); });
+    expect(seen).toHaveLength(1);
+    await expect(fs.stat(seen[0])).rejects.toThrow();
+    expect(JSON.stringify(metadata)).not.toContain("private-token");
+  });
+
+  it("cleans staged files when OpenCode fails", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(png, { headers: { "content-type": "image/png" } })) as typeof fetch;
+    let staged = "";
+    runProcessMock.mockImplementation(async (_run, _target, _command, args) => {
+      staged = args[args.indexOf("--file") + 1];
+      expect(await fs.readFile(staged)).toEqual(png);
+      throw new Error("spawn failed");
+    });
+    await expect(executeImage(descriptor)).rejects.toThrow("spawn failed");
+    await expect(fs.stat(staged)).rejects.toThrow();
+  });
+
+  it("rejects a response larger than the descriptor before spawning", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(Buffer.concat([png, png]), { headers: { "content-type": "image/png" } })) as typeof fetch;
+    await expect(executeImage(descriptor)).rejects.toThrow("Unable to stage");
+    expect(runProcessMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { ...descriptor, contentPath: "https://evil.invalid/image" },
+    { ...descriptor, id: "../bad" },
+    { ...descriptor, byteSize: 11 * 1024 * 1024 },
+  ])("rejects untrusted descriptor %s", async (attachment) => {
+    globalThis.fetch = vi.fn() as typeof fetch;
+    await expect(executeImage(attachment)).rejects.toThrow("descriptor");
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(runProcessMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    new Response(png, { status: 302, headers: { location: "https://evil.invalid/image" } }),
+    new Response(Buffer.from("not an image"), { headers: { "content-type": "image/png" } }),
+    new Response(png, { headers: { "content-type": "text/plain" } }),
+  ])("fails closed for invalid download %s", async (response) => {
+    globalThis.fetch = vi.fn(async () => response) as typeof fetch;
+    await expect(executeImage(descriptor)).rejects.toThrow("Unable to stage");
+    expect(runProcessMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("OpenCode local skill injection", () => {
   let configHome: string;
 

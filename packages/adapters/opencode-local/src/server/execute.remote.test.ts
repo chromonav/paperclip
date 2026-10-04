@@ -162,6 +162,7 @@ describe("opencode remote execution", () => {
         },
       },
       context: {
+        paperclipWake: { comments: [{ id: "comment", body: "see image", attachments: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", contentPath: "/api/attachments/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/content", contentType: "image/png", byteSize: 12 }] }] },
         paperclipWorkspace: {
           cwd: workspaceDir,
           source: "project_primary",
@@ -240,6 +241,7 @@ describe("opencode remote execution", () => {
       | [string, string, string[], { env: Record<string, string>; remoteExecution?: { remoteCwd: string } | null }]
       | undefined;
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_CWD).toBe(managedRemoteWorkspace);
+    expect(call?.[2]).not.toContain("--file");
     if (managed) {
       const home = `${managedRemoteWorkspace}/.paperclip-runtime/opencode/managed-auth/run-1`;
       expect(call?.[3].env.HOME).toBe(home);

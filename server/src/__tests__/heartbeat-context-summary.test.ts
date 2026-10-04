@@ -251,6 +251,9 @@ describe("buildPaperclipTaskMarkdown", () => {
     expect(markdown).toContain("PAPERCLIP_API_URL");
     expect(markdown).toContain("PAPERCLIP_API_KEY");
     expect(markdown).toContain("never invoke `npx`");
+    expect(markdown).toContain("a descriptor or successful download alone is not visual inspection");
+    expect(markdown).toContain("If the selected model cannot accept images");
+    expect(markdown).toContain("Remote OpenCode runs do not receive staged image bytes");
     expect(markdown).toContain(
       "Do not infer file contents from filenames or metadata",
     );

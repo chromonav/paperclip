@@ -63,6 +63,7 @@ import { removeMaintainerOnlySkillSymlinks } from "@paperclipai/adapter-utils/se
 import { prepareOpenCodeRuntimeConfig, prepareManagedOpenCodeRemoteHomes } from "./runtime-config.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { resolveOpenCodeSkillsHome } from "./skills.js";
+import { stageWakeImages } from "./image-attachments.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -331,6 +332,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({ env, config });
   const localRuntimeConfigHome =
     preparedRuntimeConfig.notes.length > 0 ? preparedRuntimeConfig.env.XDG_CONFIG_HOME : "";
+  let imageCleanup: (() => Promise<void>) | null = null;
   try {
     const runtimeEnv = Object.fromEntries(
       Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
@@ -613,8 +615,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const printLogs = isTruthyEnvFlag(
       env.PAPERCLIP_OPENCODE_PRINT_LOGS ?? process.env.PAPERCLIP_OPENCODE_PRINT_LOGS,
     );
+    const stagedImages = !executionTargetIsRemote
+      ? await stageWakeImages(context.paperclipWake, preparedRuntimeConfig.env.PAPERCLIP_API_URL, preparedRuntimeConfig.env.PAPERCLIP_API_KEY)
+      : { files: [] as string[], cleanup: async () => {} };
+    imageCleanup = stagedImages.cleanup;
     const buildArgs = (resumeSessionId: string | null) => {
       const args = ["run", "--format", "json"];
+      for (const file of stagedImages.files) args.push("--file", file);
       if (printLogs) args.push("--print-logs");
       if (resumeSessionId) args.push("--session", resumeSessionId);
       if (model) args.push("--model", model);
@@ -772,6 +779,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
     }
   } finally {
+    await imageCleanup?.();
     await preparedRuntimeConfig.cleanup();
   }
 }
