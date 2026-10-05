@@ -22,6 +22,11 @@ import {
 } from "@paperclipai/shared";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
+import {
+  assertReconciliationMatchesCheckpoint,
+  markCheckpointContinuationPending,
+  markCheckpointContinued,
+} from "./execution-dispatch-checkpoints.js";
 
 /** An operator records observed outcomes; this is not permission to blindly retry. */
 export async function validateExecutionReconciliation(input: {
@@ -38,6 +43,11 @@ export async function validateExecutionReconciliation(input: {
       "Reconcile the recorded execution and its action outcomes before continuing this task.",
     );
   }
+  await assertReconciliationMatchesCheckpoint(db, {
+    companyId,
+    runId: decision.runId,
+    actionOutcome: decision.actionOutcome,
+  });
   const [run] = await db
     .select()
     .from(heartbeatRuns)
@@ -138,7 +148,7 @@ export async function markExecutionReconciliation(
   action: Pick<
     typeof issueRecoveryActions.$inferSelect,
     "companyId" | "id" | "evidence" | "sourceIssueId"
-  >,
+  > & Partial<Pick<typeof issueRecoveryActions.$inferSelect, "cause" | "fingerprint">>,
   decision: ExecutionReconciliation,
   actorId: string,
   deliveryOwner?: { kind: "chat_failed_run_retry"; actionId: string },
@@ -197,6 +207,7 @@ export async function markExecutionReconciliation(
         eq(issueRecoveryActions.id, action.id),
       ),
     );
+  await markCheckpointContinuationPending(db, decision.runId, action);
 }
 
 export async function deliverReconciledExecutions(
@@ -291,6 +302,7 @@ export async function deliverReconciledExecutions(
               )}::jsonb`,
             })
             .where(pendingDecision);
+          await markCheckpointContinued(tx as unknown as Db, decision.runId, run.id);
         });
     } catch {
       logger.warn(

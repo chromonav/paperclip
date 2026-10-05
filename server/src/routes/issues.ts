@@ -9,6 +9,7 @@ import { deliverConversationComments, isConversation } from "../services/agent-c
 import { issueRecoveryActionReadModel } from "../services/issue-recovery-actions.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
 import { requiresExecutionReconciliation } from "@paperclipai/shared";
+import { listDispatchDiagnostics } from "../services/execution-dispatch-checkpoints.js";
 import {
   validateExecutionReconciliation,
   markExecutionReconciliation,
@@ -9071,6 +9072,23 @@ export function issueRoutes(
       active,
       actions: active ? [active] : [],
     });
+  });
+
+  router.get("/issues/:id/dispatch-diagnostics", async (req, res) => {
+    const issue = await getAccessibleResource(
+      req,
+      res,
+      getIssueById(req, req.params.id as string),
+      "Issue not found",
+    );
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    let includeProviderEvidence = false;
+    if (req.actor.type === "board") {
+      const decision = await access.decide({ actor: req.actor, action: "runtime:manage", resource: { type: "company", companyId: issue.companyId } });
+      includeProviderEvidence = decision.allowed;
+    }
+    res.json(await listDispatchDiagnostics(db, issue.companyId, issue.id, { includeProviderEvidence }));
   });
 
   router.post("/issues/:id/recovery-actions/retry-workspace-export", validate(retryWorkspaceExportSchema), async (req, res) => {

@@ -28,6 +28,14 @@ import { withAdapterExecutionPhase } from "@paperclipai/adapter-utils/execution-
 import { getConversationConfirmationContext, type ConversationConfirmationContext } from "./conversation-confirmation-context.js";
 import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
+import {
+  advanceDispatchCheckpoint,
+  completeDispatchCheckpointOnExit,
+  DispatchCheckpointUnavailableError,
+  recordDispatchIntent,
+  shouldCheckpointDispatch,
+  StaleDispatchFenceError,
+} from "./execution-dispatch-checkpoints.js";
 import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
 import { completeTerminatedRemoteNativeSessionCleanup } from "../vendor/paperclip-runner/index.js";
 import { hasRemoteTerminationReceipt, remoteExecutionHasStopped, remoteTerminationReceipt, stoppedRemoteCleanupScopes } from "./remote-execution-termination.js";
@@ -20325,6 +20333,8 @@ export function heartbeatService(
     }
 
     let legacyAdapterEntered = false;
+    let dispatchFenceGeneration: number | null = null;
+    let dispatchResolvedRuntimeKind: "native" | "legacy" | null = null;
     let run = await getRun(runId);
     if (!run) return;
     if (run.status !== "queued" && run.status !== "running") return;
@@ -22782,6 +22792,36 @@ export function heartbeatService(
           }
           return { dispatched: false };
         }
+        // Native runs keep their own coordinator. Decide from the resolved
+        // runtime and the freshly persisted row: the local `run` object is never
+        // refreshed after native selection writes `runtimeMode`.
+        const persistedRuntimeMode = (await getRun(run.id))?.runtimeMode ?? run.runtimeMode;
+        if (shouldCheckpointDispatch({
+          issueId,
+          resolvedRuntimeKind: dispatchResolvedRuntimeKind,
+          persistedRuntimeMode,
+        }) && issueId) {
+          // Persist the idempotent intent and this run's lease generation before
+          // the provider handoff. Refusing to dispatch without a saved intent is
+          // deliberate, and it ends as a classified failure with no provider work.
+          try {
+            const intent = await recordDispatchIntent(db, {
+              runId: run.id,
+              companyId: run.companyId,
+              agentId: run.agentId,
+              issueId,
+            });
+            dispatchFenceGeneration = intent.leaseGeneration;
+            await advanceDispatchCheckpoint(db, {
+              runId: run.id,
+              generation: intent.leaseGeneration,
+              stage: "dispatching",
+            });
+          } catch (checkpointErr) {
+            dispatchFenceGeneration = null;
+            throw new DispatchCheckpointUnavailableError(run.id, checkpointErr);
+          }
+        }
         if (
           !issueId ||
           (!isResolvedInteractionContinuationWakeContext(context) &&
@@ -23538,6 +23578,7 @@ export function heartbeatService(
           target: executionTarget,
           workspaceId: persistedExecutionWorkspace?.id ?? null,
         });
+        dispatchResolvedRuntimeKind = nativeRuntimeResolution.kind;
         const hasInstructionFilesystem = nativeRuntimeResolution.kind !== "native"
           ? adapter.supportsInstructionsBundle === true
           : !["claude_managed_agents_api", "aws_agentcore_harness_api"].includes(nativeRuntimeResolution.profile.backend);
@@ -24634,6 +24675,68 @@ export function heartbeatService(
           adapterFinalizeOutcome = status;
         };
 
+        // The provider is already running when these fire, so a checkpoint problem
+        // is never allowed to throw past the saved pid. A fenced run is stopped
+        // through its execution control; any other write error leaves the
+        // checkpoint at its conservative earlier stage for reconciliation.
+        const commitProviderStartedCheckpoint = async (meta: {
+          pid: number | null | undefined;
+          processGroupId?: number | null;
+        }) => {
+          if (dispatchFenceGeneration === null) return;
+          try {
+            await advanceDispatchCheckpoint(db, {
+              runId: run.id,
+              generation: dispatchFenceGeneration,
+              stage: "provider_started",
+            });
+          } catch (checkpointErr) {
+            if (checkpointErr instanceof StaleDispatchFenceError) {
+              logger.warn({ err: checkpointErr, runId: run.id }, "dispatch fence is stale at provider start; stopping the run");
+              await appendRunEvent(run, {
+                eventType: "lifecycle", stream: "system", level: "warn",
+                message: "Dispatch fence was superseded by recovery; stopping this run's provider process.",
+              }).catch(() => undefined);
+              executionControl.controller.abort(checkpointErr);
+              const stalePid = typeof meta.pid === "number" && meta.pid !== process.pid ? meta.pid : null;
+              const staleGroup =
+                typeof meta.processGroupId === "number" && meta.processGroupId !== process.pid
+                  ? meta.processGroupId
+                  : null;
+              if (stalePid !== null || staleGroup !== null) {
+                await terminateHeartbeatRunProcess({
+                  pid: stalePid,
+                  processGroupId: staleGroup,
+                  graceMs: 2_000,
+                }).catch((terminateErr) => {
+                  logger.warn({ err: terminateErr, runId: run.id }, "failed to terminate provider process after stale dispatch fence");
+                });
+              }
+              return;
+            }
+            logger.warn({ err: checkpointErr, runId: run.id }, "dispatch checkpoint provider_started write deferred to reconciliation");
+          }
+        };
+        const commitProviderReturnedCheckpoint = async (providerRef: string | null) => {
+          if (dispatchFenceGeneration === null) return;
+          try {
+            await advanceDispatchCheckpoint(db, {
+              runId: run.id,
+              generation: dispatchFenceGeneration,
+              stage: "provider_returned",
+              providerRef,
+            });
+          } catch (checkpointErr) {
+            if (checkpointErr instanceof StaleDispatchFenceError) {
+              await appendRunEvent(run, {
+                eventType: "lifecycle", stream: "system", level: "warn",
+                message: `Provider returned after the dispatch fence was superseded; the checkpoint was not advanced. Provider ref (not stored on the checkpoint): ${providerRef ?? "none"}.`,
+              }).catch(() => undefined);
+            }
+            logger.warn({ err: checkpointErr, runId: run.id, providerRef }, "dispatch checkpoint provider_returned write deferred to reconciliation");
+          }
+        };
+
         let adapterResult: AdapterExecutionResult;
         const runGoalControlRequestId = readNonEmptyString(
           context.goalControlRequestId,
@@ -25015,6 +25118,7 @@ export function heartbeatService(
                             : null,
                         startedAt: meta.startedAt,
                       });
+                      await commitProviderStartedCheckpoint(meta);
                     },
                     authToken: authToken ?? undefined,
                   }));
@@ -25022,6 +25126,9 @@ export function heartbeatService(
               );
             if (!guardedDispatch.dispatched) return;
             adapterResult = await guardedDispatch.resultPromise;
+            await commitProviderReturnedCheckpoint(
+              adapterResult.sessionDisplayId ?? adapterResult.sessionId ?? null,
+            );
           }
           if (instructionSave) adapterResult.resultJson = { ...adapterResult.resultJson, instructionSave };
           adapterResult = applyWorkspaceRestoreFailure(adapterResult);
@@ -26140,6 +26247,7 @@ export function heartbeatService(
         const failureErrorCode =
           workspaceValidationFailure?.code ??
           configurationIncompleteFailure?.code ??
+          (err instanceof DispatchCheckpointUnavailableError ? err.code : null) ??
           nonRetryablePreflightFailureCode(err) ??
           recordedResponsibleUserDenialCode ??
           nativeTerminalFailureCode ??
@@ -26755,6 +26863,9 @@ export function heartbeatService(
         }
       } finally {
         controllerLease.stop();
+        await completeDispatchCheckpointOnExit(db, run.id).catch((err) => {
+          logger.warn({ err, runId: run.id }, "dispatch checkpoint completion deferred to reconciliation");
+        });
         activeRunExecutions.delete(run.id);
         // A failed owned Stop remains visible until this exact executor settles,
         // including a graceful exit result arriving after the cancellation error.

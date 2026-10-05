@@ -10087,6 +10087,38 @@ registerCurrentRoute({
 });
 
 registerCurrentRoute({
+  method: "get",
+  path: "/api/issues/{id}/dispatch-diagnostics",
+  tags: ["issues"],
+  summary: "Inspect dispatch checkpoints, fence generation, recovery and continuation for an issue (provider refs, idempotency keys and raw side effects only for board actors with runtime:manage)",
+  responses: {
+    200: r.ok(z.object({
+      issueId: z.string(),
+      fenceGeneration: z.number().nullable(),
+      checkpoints: z.array(z.object({
+        runId: z.string(),
+        agentId: z.string().nullable(),
+        agentName: z.string().nullable(),
+        runStatus: z.string(),
+        providerRef: z.string().nullable(),
+        leaseGeneration: z.number(),
+        stale: z.boolean(),
+        stage: z.string(),
+        idempotencyKey: z.string().nullable(),
+        sideEffects: z.array(z.record(z.string(), z.unknown())),
+        sideEffectCount: z.number(),
+        recoveryState: z.string(),
+        recoveryActionId: z.string().nullable(),
+        continuationRunId: z.string().nullable(),
+        createdAt: z.string(),
+        updatedAt: z.string(),
+      })),
+    })),
+    401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+  },
+});
+
+registerCurrentRoute({
   method: "post",
   path: "/api/issues/{id}/recovery-actions/retry-workspace-export",
   tags: ["issues"],
