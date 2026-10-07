@@ -13,10 +13,8 @@ const mockFolderService = vi.hoisted(() => ({
 
 const mockLogActivity = vi.hoisted(() => vi.fn());
 
-vi.mock("../services/index.js", () => ({
-  folderService: () => mockFolderService,
-  logActivity: mockLogActivity,
-}));
+vi.mock("../services/folders.js", () => ({ folderService: () => mockFolderService }));
+vi.mock("../services/activity-log.js", () => ({ logActivity: mockLogActivity }));
 
 async function createApp() {
   vi.resetModules();

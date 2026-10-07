@@ -2,6 +2,11 @@ import { and, asc, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { goals } from "@paperclipai/db";
 
+export interface GoalReadService {
+  list(companyId: string): Promise<Array<typeof goals.$inferSelect>>;
+  getById(id: string): Promise<typeof goals.$inferSelect | null>;
+}
+
 type GoalReader = Pick<Db, "select">;
 
 export async function getDefaultCompanyGoal(db: GoalReader, companyId: string) {

@@ -1,0 +1,8 @@
+**
+!server
+!server/src
+!server/src/**
+!docker
+!docker/read-offload
+!docker/read-offload/Dockerfile
+!docker/read-offload/Dockerfile.dockerignore

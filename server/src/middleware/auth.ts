@@ -210,6 +210,8 @@ async function auditAgentKeyMissingResponsibleUser(
 interface ActorMiddlewareOptions {
   deploymentMode: DeploymentMode;
   resolveSession?: (req: Request) => Promise<BetterAuthSessionResult | null>;
+  /** Reader processes validate board credentials without writes or agent runtime identity. */
+  readOnlyBoard?: boolean;
 }
 
 const publicMcpGatewayProtocolPath = /^\/mcp\/gateways\/gw_[a-f0-9]{32}\/?$/i;
@@ -248,7 +250,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
 
     if (!hasBearerCredentials) {
       if (opts.deploymentMode === "authenticated" && opts.resolveSession) {
-        const cloudTenantActor = await resolveCloudTenantActor(db, req);
+        const cloudTenantActor = opts.readOnlyBoard ? null : await resolveCloudTenantActor(db, req);
         if (cloudTenantActor) {
           req.actor = {
             ...cloudTenantActor,
@@ -308,7 +310,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
     if (boardKey) {
       const access = await boardAuth.resolveBoardAccess(boardKey.userId);
       if (access.user) {
-        await boardAuth.touchBoardApiKey(boardKey.id);
+        if (!opts.readOnlyBoard) await boardAuth.touchBoardApiKey(boardKey.id);
         req.actor = {
           type: "board",
           userId: boardKey.userId,
@@ -324,6 +326,11 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         next();
         return;
       }
+    }
+
+    if (opts.readOnlyBoard) {
+      next(unauthorized("Board authentication required on a read replica"));
+      return;
     }
 
     const tokenHash = hashToken(token);

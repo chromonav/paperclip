@@ -187,6 +187,10 @@ async function endDatabaseClient(client: unknown, timeoutSeconds: number): Promi
 }
 
 export async function startServer(): Promise<StartedServer> {
+  const role = process.env.PAPERCLIP_SERVER_ROLE ?? "coordinator";
+  if (role !== "coordinator") {
+    throw new Error("The coordinator entrypoint requires PAPERCLIP_SERVER_ROLE=coordinator; readers must use server/dist/reader.js");
+  }
   const startupDatabase: StartupDatabaseTeardown = { close: null };
   try {
     return await startServerWithDatabaseTeardown(startupDatabase);

@@ -10,12 +10,12 @@ import {
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { badRequest, forbidden } from "../errors.js";
-import { folderService, logActivity } from "../services/index.js";
+import { folderService, type FolderReadService } from "../services/folders.js";
+import { logActivity } from "../services/activity-log.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 
-export function folderRoutes(db: Db) {
+export function folderReadRoutes(svc: FolderReadService) {
   const router = Router();
-  const svc = folderService(db);
 
   function parseKind(value: unknown) {
     const result = folderKindSchema.safeParse(value);
@@ -28,6 +28,13 @@ export function folderRoutes(db: Db) {
     assertCompanyAccess(req, companyId);
     res.json(await svc.list(companyId, parseKind(req.query.kind)));
   });
+  return router;
+}
+
+export function folderRoutes(db: Db) {
+  const router = Router();
+  const svc = folderService(db);
+  router.use(folderReadRoutes(svc));
 
   router.post("/companies/:companyId/folders", validate(createFolderSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
