@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
+import { executeWithSandboxCancellation } from "@paperclipai/adapter-utils/sandbox-cancellation";
 import { buildCodexAuthInboundProvision } from "./codex-auth-merge-scripts.js";
 import { copyBackCodexAuth } from "./codex-auth-copyback.js";
 import {
@@ -584,6 +585,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (engineSelection.engine === "acp") {
     return executeCodexAcp(ctx);
   }
+  return executeWithSandboxCancellation(ctx, executeCli);
+}
+
+async function executeCli(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
 
   const { runId, agent, runtime, config, context, onLog, onMeta, onEvent, onSpawn, authToken } = ctx;
 

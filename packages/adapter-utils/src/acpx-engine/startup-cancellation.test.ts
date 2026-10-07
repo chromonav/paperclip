@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionContext } from "../types.js";
 import type { CommandManagedDuplexChannel, CommandManagedRuntimeRunner } from "../command-managed-runtime.js";
-import { cancellableSandboxStartup } from "./startup-cancellation.js";
+import { cancellableSandboxExecution } from "../sandbox-cancellation.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -14,10 +14,10 @@ function fixture(stop = vi.fn(async () => {}), extra: Partial<CommandManagedRunt
   const controller = new AbortController();
   const execute = vi.fn(async () => result);
   const ctx = {
-    signal: controller.signal, stopRemoteStartup: stop,
+    signal: controller.signal, stopRemoteExecution: stop,
     executionTarget: { kind: "remote", transport: "sandbox", providerKey: "daytona", runner: { execute, ...extra } },
   } as unknown as AdapterExecutionContext;
-  const startup = cancellableSandboxStartup(ctx);
+  const startup = cancellableSandboxExecution(ctx);
   const runner = (startup.context.executionTarget as { runner: CommandManagedRuntimeRunner }).runner;
   return { controller, execute, stop, startup, runner };
 }

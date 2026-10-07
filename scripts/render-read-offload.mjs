@@ -15,6 +15,7 @@ const { values } = parseArgs({ options: {
   "storage-class": { type: "string" },
   "storage-size": { type: "string", default: "200Gi" },
   "trust-proxy": { type: "string" },
+  "install-kubernetes-cancellation-overlay": { type: "boolean", default: false },
 } });
 if (!values.image || !/^[\w./:-]+@sha256:[a-f0-9]{64}$/.test(values.image)) throw new Error("--image must name the validated image by immutable sha256 digest");
 if (!values["public-url"]) throw new Error("--public-url is required and must match the coordinator's auth origin");
@@ -25,6 +26,7 @@ for (const value of [values.namespace, values.name, values["coordinator-name"], 
 }
 if (values.name === values["coordinator-name"]) throw new Error("Readers and coordinator must have distinct names");
 if (values["create-coordinator"] && !values["storage-class"]) throw new Error("New rehearsal coordinators require an explicit block --storage-class (never NFS)");
+if (values["install-kubernetes-cancellation-overlay"] && !values["create-coordinator"]) throw new Error("The pinned Kubernetes cancellation overlay requires an explicitly created rehearsal coordinator");
 if (!/^[1-9][0-9]*(?:Gi|Ti)$/.test(values["storage-size"])) throw new Error("--storage-size must be a positive Gi or Ti quantity");
 const namespace = values.namespace;
 const coordinator = values["coordinator-name"];
@@ -88,6 +90,13 @@ if (values["create-coordinator"]) {
     apiVersion: "apps/v1", kind: "StatefulSet", metadata: { name: coordinator, namespace },
     spec: { serviceName: coordinator, replicas: 1, selector: { matchLabels: labels }, template: { metadata: { labels }, spec: {
       securityContext,
+      ...(values["install-kubernetes-cancellation-overlay"] ? { initContainers: [{
+        name: "kubernetes-cancellation-overlay",
+        image: values.image,
+        command: ["node", "docker/read-offload/install-kubernetes-overlay.mjs", "/paperclip/adapter-plugins/kubernetes-sandbox"],
+        securityContext: { ...containerSecurity, readOnlyRootFilesystem: true },
+        volumeMounts: [{ name: "home", mountPath: "/paperclip" }],
+      }] } : {}),
       containers: [{
         name: "paperclip", image: values.image,
         env: [...env,

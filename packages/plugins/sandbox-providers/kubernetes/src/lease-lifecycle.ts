@@ -21,6 +21,7 @@ import { deleteJob, findPodForJob, getJobStatus } from "./job-orchestrator.js";
 import {
   deleteSandboxCr,
   findPodForSandbox,
+  getSandboxCrStatus,
   waitForSandboxReady,
 } from "./sandbox-cr-orchestrator.js";
 
@@ -190,4 +191,39 @@ export async function destroyLeaseResources(
       }),
     );
   }
+}
+
+/** A foreground delete acknowledgement is not process termination. Confirm
+ * both the workload and its exact pods are gone before issuing a Stop receipt. */
+export async function waitForLeaseTermination(
+  clients: KubeClients,
+  input: Pick<DestroyLeaseInput, "namespace" | "name" | "backend" | "podName">,
+): Promise<void> {
+  // Leave room for adapter cleanup within the coordinator's 60-second Stop wait.
+  const deadline = Date.now() + 45_000;
+  const ownerKind = input.backend === "sandbox-cr" ? "Sandbox" : "Job";
+  while (Date.now() < deadline) {
+    let workloadExists = true;
+    try {
+      if (input.backend === "sandbox-cr") {
+        await getSandboxCrStatus(clients, input.namespace, input.name);
+      } else {
+        await getJobStatus(clients, input.namespace, input.name);
+      }
+    } catch (error) {
+      if (!isKubeNotFoundError(error)) throw error;
+      workloadExists = false;
+    }
+    if (!workloadExists) {
+      const pods = await clients.core.listNamespacedPod({ namespace: input.namespace });
+      const ownedPodExists = pods.items.some((pod) =>
+        pod.metadata?.name === input.podName ||
+        (input.backend === "sandbox-cr" && pod.metadata?.name === input.name) ||
+        pod.metadata?.ownerReferences?.some((owner) => owner.kind === ownerKind && owner.name === input.name),
+      );
+      if (!ownedPodExists) return;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`Termination of ${ownerKind} ${input.namespace}/${input.name} could not be verified`);
 }

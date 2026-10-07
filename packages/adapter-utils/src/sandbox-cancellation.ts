@@ -1,12 +1,12 @@
-import type { AdapterExecutionContext } from "../types.js";
-import type { CommandManagedRuntimeRunner } from "../command-managed-runtime.js";
+import type { AdapterExecutionContext, AdapterExecutionResult } from "./types.js";
+import type { CommandManagedRuntimeRunner } from "./command-managed-runtime.js";
 
-/** Stop owns the sandbox before abandoning an outstanding startup RPC. The
- * original RPC may complete late; its result cannot restart preparation. */
-export function cancellableSandboxStartup(ctx: AdapterExecutionContext) {
+/** Stop owns the sandbox before abandoning an outstanding RPC. The original
+ * RPC may complete late; its result cannot restart work after verified Stop. */
+export function cancellableSandboxExecution(ctx: AdapterExecutionContext) {
   const target = ctx.executionTarget;
   const signal = ctx.signal;
-  const stop = ctx.stopRemoteStartup;
+  const stop = ctx.stopRemoteExecution;
   if (!signal || !stop || target?.kind !== "remote" || target.transport !== "sandbox" || !target.runner) {
     return { context: ctx, finish: async () => {} };
   }
@@ -21,7 +21,7 @@ export function cancellableSandboxStartup(ctx: AdapterExecutionContext) {
     if (stopping) return;
     stopping = Promise.resolve().then(stop);
     void stopping.then(
-      () => rejectStopped(signal.reason ?? new Error("Stopped during sandbox startup")),
+      () => rejectStopped(signal.reason ?? new Error("Sandbox execution stopped")),
       // Without proof, the original operation still owns its resources. Do
       // not abandon it or release credentials while it could be running.
       () => {},
@@ -85,4 +85,25 @@ export function cancellableSandboxStartup(ctx: AdapterExecutionContext) {
       signal.throwIfAborted();
     },
   };
+}
+
+/** CLI adapters have no local child to kill. Keep their existing adapter owner
+ * through remote setup, execution and cleanup, not just until command launch. */
+export async function executeWithSandboxCancellation(
+  ctx: AdapterExecutionContext,
+  execute: (context: AdapterExecutionContext) => Promise<AdapterExecutionResult>,
+): Promise<AdapterExecutionResult> {
+  const target = ctx.executionTarget;
+  if (!ctx.signal || !ctx.stopRemoteExecution ||
+      target?.kind !== "remote" || target.transport !== "sandbox" || !target.runner) {
+    return execute(ctx);
+  }
+  await ctx.onCancellationReady?.();
+  const cancellation = cancellableSandboxExecution(ctx);
+  try {
+    ctx.signal.throwIfAborted();
+    return await execute(cancellation.context);
+  } finally {
+    await cancellation.finish();
+  }
 }

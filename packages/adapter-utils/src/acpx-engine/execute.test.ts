@@ -3829,7 +3829,7 @@ describe("ACPX engine remote session-lifecycle re-staging (PR 3: stage once / re
     const started = new Promise<void>(resolve => { entered = resolve; });
     let release!: () => void;
     const blocked = new Promise<void>(resolve => { release = resolve; });
-    const stopRemoteStartup = vi.fn(async () => {});
+    const stopRemoteExecution = vi.fn(async () => {});
     const createRuntime = vi.fn(() => recordingRuntime({ ensureInputs: [] }) as never);
     const originalExecute = executionTarget.runner.execute;
     executionTarget.runner.execute = async input => {
@@ -3855,12 +3855,12 @@ describe("ACPX engine remote session-lifecycle re-staging (PR 3: stage once / re
     const run = execute({
       runId: "cancel-startup", runtime: {},
       ...baseExecuteArgs({ stateDir, localCwd, executionTarget }),
-      signal: controller.signal, stopRemoteStartup,
+      signal: controller.signal, stopRemoteExecution,
     } as never).catch(error => error).finally(() => { settled = true; });
     await started;
     controller.abort(new Error("Stopped by user"));
     try {
-      await vi.waitFor(() => expect(stopRemoteStartup).toHaveBeenCalledTimes(1), { timeout: 500 });
+      await vi.waitFor(() => expect(stopRemoteExecution).toHaveBeenCalledTimes(1), { timeout: 500 });
       await vi.waitFor(() => expect(settled).toBe(true), { timeout: 500 });
       expect(createRuntime).not.toHaveBeenCalled();
     } finally {
