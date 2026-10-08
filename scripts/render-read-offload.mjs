@@ -95,7 +95,7 @@ if (values["create-coordinator"]) {
         image: values.image,
         command: ["node", "docker/read-offload/install-kubernetes-overlay.mjs", "/paperclip/adapter-plugins/kubernetes-sandbox"],
         securityContext: { ...containerSecurity, readOnlyRootFilesystem: true },
-        volumeMounts: [{ name: "home", mountPath: "/paperclip" }],
+        volumeMounts: [{ name: "data", mountPath: "/paperclip" }],
       }] } : {}),
       containers: [{
         name: "paperclip", image: values.image,
