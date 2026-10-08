@@ -39,7 +39,6 @@ vi.mock("../telemetry.js", () => ({
 vi.mock("../services/index.js", () => ({
   accessService: () => mockAccessService,
   environmentService: () => mockEnvironmentService,
-  goalService: () => mockGoalService,
   logActivity: mockLogActivity,
   projectService: () => mockProjectService,
   secretService: () => mockSecretService,
@@ -52,8 +51,10 @@ vi.mock("../services/workspace-runtime.js", () => ({
 }));
 
 function registerModuleMocks() {
+  vi.doMock("../services/goals.js", () => ({ goalService: () => mockGoalService }));
   vi.doMock("../services/activity-log.js", async () => ({
     ...await vi.importActual<typeof import("../services/activity-log.js")>("../services/activity-log.js"),
+    logActivity: mockLogActivity,
     persistActivity: async (db: unknown, input: unknown) => { await mockLogActivity(db, input); return { activity: { id: "activity" }, publication: null }; },
     publishActivity: vi.fn(),
   }));
@@ -64,7 +65,6 @@ function registerModuleMocks() {
   vi.doMock("../services/index.js", () => ({
     accessService: () => mockAccessService,
     environmentService: () => mockEnvironmentService,
-    goalService: () => mockGoalService,
     logActivity: mockLogActivity,
     projectService: () => mockProjectService,
     secretService: () => mockSecretService,
@@ -113,6 +113,7 @@ describe("project and goal telemetry routes", () => {
     vi.resetModules();
     vi.doUnmock("../telemetry.js");
     vi.doUnmock("../services/index.js");
+    vi.doUnmock("../services/goals.js");
     vi.doUnmock("../services/workspace-runtime.js");
     vi.doUnmock("../routes/projects.js");
     vi.doUnmock("../routes/goals.js");

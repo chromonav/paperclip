@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
+import { executeWithSandboxCancellation } from "@paperclipai/adapter-utils/sandbox-cancellation";
 import type { RunProcessResult } from "@paperclipai/adapter-utils/server-utils";
 import {
   adapterExecutionTargetIsRemote,
@@ -418,6 +419,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (engineSelection.engine === "acp") {
     return executeClaudeAcp(ctx);
   }
+  return executeWithSandboxCancellation(ctx, executeCli);
+}
+
+async function executeCli(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
 
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
   const executionTarget = readAdapterExecutionTarget({

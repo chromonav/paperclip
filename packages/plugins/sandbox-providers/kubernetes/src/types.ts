@@ -91,6 +91,7 @@ export interface KubernetesLeaseMetadata {
   /** Which backend provisioned this lease. */
   backend: "sandbox-cr" | "job";
   scopedNetworkPolicyName: string | null;
+  remoteCwd?: string;
   scopedNetworkEgress: {
     allowFqdns: string[];
     allowCidrs: string[];

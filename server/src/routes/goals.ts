@@ -3,13 +3,13 @@ import type { Db } from "@paperclipai/db";
 import { createGoalSchema, updateGoalSchema } from "@paperclipai/shared";
 import { trackGoalCreated } from "@paperclipai/shared/telemetry";
 import { validate } from "../middleware/validate.js";
-import { goalService, logActivity } from "../services/index.js";
+import { goalService, type GoalReadService } from "../services/goals.js";
+import { logActivity } from "../services/activity-log.js";
 import { assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
 import { getTelemetryClient } from "../telemetry.js";
 
-export function goalRoutes(db: Db) {
+export function goalReadRoutes(svc: GoalReadService) {
   const router = Router();
-  const svc = goalService(db);
 
   router.get("/companies/:companyId/goals", async (req, res) => {
     const companyId = req.params.companyId as string;
@@ -24,6 +24,13 @@ export function goalRoutes(db: Db) {
     if (!goal) return;
     res.json(goal);
   });
+  return router;
+}
+
+export function goalRoutes(db: Db) {
+  const router = Router();
+  const svc = goalService(db);
+  router.use(goalReadRoutes(svc));
 
   router.post("/companies/:companyId/goals", validate(createGoalSchema), async (req, res) => {
     const companyId = req.params.companyId as string;

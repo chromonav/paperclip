@@ -15,6 +15,7 @@ import type {
   PluginEnvironmentSyncInParams,
   PluginEnvironmentSyncOutParams,
   PluginEnvironmentSyncResult,
+  PluginEnvironmentTerminationReceipt,
   PluginEnvironmentValidateConfigParams,
   PluginEnvironmentValidationResult,
 } from "@paperclipai/plugin-sdk";
@@ -38,7 +39,7 @@ import {
 } from "./sandbox-cr-orchestrator.js";
 import { execInPod, execInPodStreaming, wrapCommandWithEnv } from "./pod-exec.js";
 import { performSyncIn, performSyncOut, type PodStreamExec } from "./file-sync.js";
-import { checkLeaseResumable, destroyLeaseResources } from "./lease-lifecycle.js";
+import { checkLeaseResumable, destroyLeaseResources, waitForLeaseTermination } from "./lease-lifecycle.js";
 import {
   appendNetworkEgressDenyHint,
   createScopedNetworkEgressPolicyOrReleaseWorkload,
@@ -124,7 +125,8 @@ const RESUME_READY_POLL_MS = 1_000;
 // it so a sync can never run without a concrete root to confine every sandbox
 // path against.
 function resolveSyncRemoteDir(lease: PluginEnvironmentLease): string {
-  const remoteCwd = lease.metadata?.remoteCwd;
+  const realization = lease.metadata?.workspaceRealization as { remote?: { path?: unknown } } | undefined;
+  const remoteCwd = lease.metadata?.remoteCwd ?? realization?.remote?.path;
   if (typeof remoteCwd === "string" && remoteCwd.trim().length > 0) {
     return remoteCwd.trim();
   }
@@ -455,6 +457,7 @@ const plugin = definePlugin({
       phase: "Pending",
       backend: config.backend,
       scopedNetworkPolicyName,
+      remoteCwd: "/workspace",
       scopedNetworkEgress,
       // Native file sync streams over a pod exec; only the sandbox-cr backend
       // exposes one. Flag the job backend so the server keeps the base64 fallback
@@ -529,6 +532,7 @@ const plugin = definePlugin({
       secretName,
       phase: check.phase,
       backend: leaseBackend,
+      remoteCwd: "/workspace",
       scopedNetworkPolicyName:
         typeof params.leaseMetadata?.scopedNetworkPolicyName === "string"
           ? params.leaseMetadata.scopedNetworkPolicyName
@@ -571,7 +575,7 @@ const plugin = definePlugin({
 
   async onEnvironmentReleaseLease(
     params: PluginEnvironmentReleaseLeaseParams,
-  ): Promise<void> {
+  ): Promise<void | PluginEnvironmentTerminationReceipt> {
     if (!params.providerLeaseId) return;
     const config = kubernetesProviderConfigSchema.parse(params.config);
     const namespace =
@@ -605,6 +609,15 @@ const plugin = definePlugin({
       const code = (err as { code?: number; statusCode?: number }).code
         ?? (err as { code?: number; statusCode?: number }).statusCode;
       if (code !== 404) throw err;
+    }
+    if (params.cancelActiveWork) {
+      await waitForLeaseTermination(clients, {
+        namespace,
+        name: params.providerLeaseId,
+        backend: leaseBackend,
+        podName: typeof params.leaseMetadata?.podName === "string" ? params.leaseMetadata.podName : null,
+      });
+      return { providerLeaseId: params.providerLeaseId, state: "destroyed" };
     }
   },
 

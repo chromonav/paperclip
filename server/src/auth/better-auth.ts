@@ -238,7 +238,12 @@ export function resolveWorkspaceHandoffIdentity(
   };
 }
 
-export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins: string[]): BetterAuthInstance {
+export function createBetterAuthInstance(
+  db: Db,
+  config: Config,
+  trustedOrigins: string[],
+  options: { readOnly?: boolean } = {},
+): BetterAuthInstance {
   const baseUrl = config.authBaseUrlMode === "explicit" ? config.authPublicBaseUrl : undefined;
   const publicUrl = process.env.PAPERCLIP_PUBLIC_URL?.trim() || baseUrl;
   const managedRuntimePublicUrl = process.env.PAPERCLIP_MANAGED_RUNTIME_PUBLIC_URL?.trim() || undefined;
@@ -281,6 +286,15 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
       override: process.env.PAPERCLIP_AUTH_RATE_LIMIT_ENABLED,
     }),
     advanced: buildBetterAuthAdvancedOptions({ disableSecureCookies }),
+    // Reader authentication must not renew or delete sessions. Better Auth's
+    // deferred GET path also leaves expired rows for the coordinator to clean.
+    ...(options.readOnly ? {
+      session: {
+        deferSessionRefresh: true,
+        disableSessionRefresh: true,
+        cookieCache: { enabled: false },
+      },
+    } : {}),
     // Registered only for a managed workspace instance: the plugin is what makes
     // `Open workspace` password-independent, and a control-plane instance that
     // was never handed a workspace key must not expose the exchange at all.

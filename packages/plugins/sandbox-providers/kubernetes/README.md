@@ -42,6 +42,12 @@ The plugin supports two backend modes, selected via the `backend` config field:
 
 **`job` (stable fallback):** Creates a `batch/v1` Job. The container entrypoint runs once and exits — no multi-command exec possible. Use this when you cannot install agent-sandbox, or when you need strictly stable Kubernetes APIs. Note: paperclip-server's adapter-install pattern will not work in job mode.
 
+### Explicit cancellation
+
+For an explicit Stop (`cancelActiveWork: true`), deletion submission is not proof of termination. After requesting normal foreground deletion, the provider waits until the recorded Sandbox CR or Job and its exact owned pods are absent, then returns a receipt bound to that provider lease. The host verifies the company, run, lease, and successful cleanup before acknowledging cancellation. Neighboring pods are not deleted.
+
+The provider needs permission to read the recorded workload and list pods in its tenant namespace. API errors or expiration of the bounded provider/RPC wait fail closed rather than report a successful Stop. Ordinary lease release retains its existing behavior; this does not add a global lease reaper or reconcile historical executions.
+
 ### Migrating from `job` to `sandbox-cr`
 
 1. Install the agent-sandbox controller: `kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/install.yaml`

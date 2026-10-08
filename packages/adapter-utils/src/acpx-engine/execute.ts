@@ -1,4 +1,4 @@
-import { cancellableSandboxStartup } from "./startup-cancellation.js";
+import { cancellableSandboxExecution } from "../sandbox-cancellation.js";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import os from "node:os";
@@ -4119,7 +4119,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         // run inside this wrap and overrides the store, so an in-step exec still
         // parents to its step span. On a local or SSH target
         // `spanParent.parentContext` is a no-op token, so the wrap is inert.
-        const startupCancellation = cancellableSandboxStartup(ctx);
+        const startupCancellation = cancellableSandboxExecution(ctx);
         try {
           prepared = await runWithRuntimeParent(spanParent.parentContext, () =>
             buildRuntime({

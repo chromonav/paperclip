@@ -12,6 +12,10 @@ import type {
 } from "@paperclipai/shared";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 
+export interface FolderReadService {
+  list(companyId: string, kind: FolderKind): Promise<FolderListResult>;
+}
+
 const MAX_FOLDER_DEPTH = 4;
 const RESERVED_ROOT_SLUGS = new Set(["bundled", "my", "projects"]);
 const RESERVED_CHILD_ROOT_SYSTEM_KEYS = new Set(["my", "projects"]);
