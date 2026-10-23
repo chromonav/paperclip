@@ -450,7 +450,7 @@ describe("decideReleaseRecovery", () => {
       expected: { kind: "blocked", notice: "execution_review_participant" } as const,
     })),
     {
-      name: "released: a review-participant recovery run that succeeded without a decision is not a failed recovery",
+      name: "blocked: a review-participant recovery run that succeeded without a decision while the stage is still pending",
       facts: {
         ...baseReleaseRecoveryFacts,
         reviewParticipant: {
@@ -460,7 +460,7 @@ describe("decideReleaseRecovery", () => {
           finishingRunStatus: "succeeded",
         },
       },
-      expected: { kind: "released" },
+      expected: { kind: "blocked", notice: "execution_review_participant" },
     },
     ...(["issue_reassigned", "issue_assignee_changed"] as const).map((finishingRunErrorCode) => ({
       name: `released: a review-participant recovery run cancelled with ${finishingRunErrorCode}`,

@@ -775,9 +775,21 @@ describe("releaseIssueExecution review-participant recovery runs", () => {
     expect(recovery.escalateStrandedAssignedIssue).not.toHaveBeenCalled();
   });
 
-  it("releases without escalating when the recovery run succeeded", async () => {
+  it("still blocks when the recovery run succeeded but the stage is still pending with the same participant", async () => {
     const run = { ...RUN, agentId: "rez", status: "succeeded", contextSnapshot: REVIEW_RECOVERY_CONTEXT };
     const { result, recovery } = await release(pendingReviewIssue("rez"), run);
+    expect(result.outcome.kind).toBe("blocked");
+    expect(recovery.escalateStrandedAssignedIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases without escalating when the recovery run succeeded and the issue already moved on to done", async () => {
+    const run = { ...RUN, agentId: "rez", status: "succeeded", contextSnapshot: REVIEW_RECOVERY_CONTEXT };
+    const done = {
+      ...ISSUE,
+      status: "done",
+      executionState: { status: "completed", currentParticipant: null } as IssueSnapshot["executionState"],
+    };
+    const { result, recovery } = await release(done, run);
     expect(result.outcome.kind).toBe("released");
     expect(recovery.escalateStrandedAssignedIssue).not.toHaveBeenCalled();
   });

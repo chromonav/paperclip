@@ -219,17 +219,16 @@ export type ReleaseRecoveryReviewParticipantFacts = {
 const REVIEW_RECOVERY_RELEASED_CANCEL_CODES = new Set(["issue_reassigned", "issue_assignee_changed"]);
 
 /**
- * A review-participant recovery run counts as a failed recovery only when it
- * failed or timed out, or was cancelled for a reason other than the issue
- * moving to another participant. A run that succeeded chose its own
- * disposition, and a run cancelled by a handoff has been overtaken by the
- * next stage; neither is evidence that recovery failed.
+ * A review-participant recovery run counts as a failed recovery unless it was
+ * cancelled because the issue moved to another participant. A run that
+ * succeeded without a decision while the stage is still pending with the same
+ * participant is still a failed recovery; a stage that moved on is covered by
+ * the facts that decide whether review-participant recovery applies and by the
+ * write guard in the recovery service.
  */
 function isFailedReviewParticipantRecoveryRun(facts: ReleaseRecoveryReviewParticipantFacts): boolean {
   if (!facts.isExecutionReviewParticipantRecoveryRun) return false;
   switch (facts.finishingRunStatus) {
-    case "succeeded":
-      return false;
     case "cancelled":
       return !REVIEW_RECOVERY_RELEASED_CANCEL_CODES.has(facts.finishingRunErrorCode ?? "");
     default:
