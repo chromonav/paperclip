@@ -585,6 +585,8 @@ async function runReleaseRecoveryTail(
       applies: reviewParticipantApplies,
       isExecutionReviewParticipantRecoveryRun:
         isExecutionReviewParticipantRecoveryRun(run),
+      finishingRunStatus: run.status,
+      finishingRunErrorCode: run.errorCode,
     },
     immediate: {
       applies: immediateApplies,

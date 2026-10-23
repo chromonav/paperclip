@@ -281,6 +281,8 @@ const baseReleaseRecoveryFacts: ReleaseRecoveryFacts = {
   reviewParticipant: {
     applies: false,
     isExecutionReviewParticipantRecoveryRun: false,
+    finishingRunStatus: "failed",
+    finishingRunErrorCode: null,
   },
   immediate: {
     applies: false,
@@ -429,7 +431,76 @@ describe("decideReleaseRecovery", () => {
           ...baseReleaseRecoveryFacts.reviewParticipant,
           applies: true,
           isExecutionReviewParticipantRecoveryRun: true,
+          finishingRunStatus: "failed",
         },
+      },
+      expected: { kind: "blocked", notice: "execution_review_participant" },
+    },
+    ...(["failed", "timed_out"] as const).map((finishingRunStatus) => ({
+      name: `blocked: a review-participant recovery run that ${finishingRunStatus} still blocks`,
+      facts: {
+        ...baseReleaseRecoveryFacts,
+        reviewParticipant: {
+          ...baseReleaseRecoveryFacts.reviewParticipant,
+          applies: true,
+          isExecutionReviewParticipantRecoveryRun: true,
+          finishingRunStatus,
+        },
+      },
+      expected: { kind: "blocked", notice: "execution_review_participant" } as const,
+    })),
+    {
+      name: "released: a review-participant recovery run that succeeded without a decision is not a failed recovery",
+      facts: {
+        ...baseReleaseRecoveryFacts,
+        reviewParticipant: {
+          ...baseReleaseRecoveryFacts.reviewParticipant,
+          applies: true,
+          isExecutionReviewParticipantRecoveryRun: true,
+          finishingRunStatus: "succeeded",
+        },
+      },
+      expected: { kind: "released" },
+    },
+    ...(["issue_reassigned", "issue_assignee_changed"] as const).map((finishingRunErrorCode) => ({
+      name: `released: a review-participant recovery run cancelled with ${finishingRunErrorCode}`,
+      facts: {
+        ...baseReleaseRecoveryFacts,
+        reviewParticipant: {
+          ...baseReleaseRecoveryFacts.reviewParticipant,
+          applies: true,
+          isExecutionReviewParticipantRecoveryRun: true,
+          finishingRunStatus: "cancelled",
+          finishingRunErrorCode,
+        },
+      },
+      expected: { kind: "released" } as const,
+    })),
+    {
+      name: "blocked: a review-participant recovery run cancelled for another reason still blocks",
+      facts: {
+        ...baseReleaseRecoveryFacts,
+        reviewParticipant: {
+          ...baseReleaseRecoveryFacts.reviewParticipant,
+          applies: true,
+          isExecutionReviewParticipantRecoveryRun: true,
+          finishingRunStatus: "cancelled",
+          finishingRunErrorCode: "cancelled_by_operator",
+        },
+      },
+      expected: { kind: "blocked", notice: "execution_review_participant" },
+    },
+    {
+      name: "blocked: an uninvokable participant blocks even when its recovery run succeeded (HYBA-2972 shape)",
+      facts: {
+        ...baseReleaseRecoveryFacts,
+        reviewParticipant: {
+          ...baseReleaseRecoveryFacts.reviewParticipant,
+          applies: true,
+          isExecutionReviewParticipantRecoveryRun: true,
+          finishingRunStatus: "succeeded",
+        },
+        shared: { ...baseReleaseRecoveryFacts.shared, recoveryAgentInvokable: false },
       },
       expected: { kind: "blocked", notice: "execution_review_participant" },
     },

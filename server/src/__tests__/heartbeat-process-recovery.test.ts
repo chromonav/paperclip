@@ -9669,6 +9669,192 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     ).toHaveLength(0);
   });
 
+  describe("stale execution-review participant recovery escalation", () => {
+    async function escalateReviewRecovery(
+      issueId: string,
+      runId: string,
+      previousStatus: "in_review" = "in_review",
+    ) {
+      const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+      const [latestRun] = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId));
+      const recovery = recoveryService(db, { enqueueWakeup: vi.fn() });
+      return recovery.escalateStrandedAssignedIssue({
+        issue,
+        previousStatus,
+        latestRun,
+        recoveryCause: "execution_review_participant_recovery",
+      });
+    }
+
+    async function finishRecoveryRun(
+      runId: string,
+      patch: { status: string; errorCode?: string | null },
+    ) {
+      await db
+        .update(heartbeatRuns)
+        .set({
+          status: patch.status,
+          errorCode: patch.errorCode ?? null,
+          finishedAt: new Date("2026-03-19T00:05:00.000Z"),
+          updatedAt: new Date("2026-03-19T00:05:00.000Z"),
+        })
+        .where(eq(heartbeatRuns.id, runId));
+    }
+
+    async function issueStatusAndComments(issueId: string) {
+      const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+      const comments = await db
+        .select()
+        .from(issueComments)
+        .where(eq(issueComments.issueId, issueId));
+      const actions = await db
+        .select()
+        .from(issueRecoveryActions)
+        .where(eq(issueRecoveryActions.sourceIssueId, issueId));
+      const activity = await db
+        .select()
+        .from(activityLog)
+        .where(eq(activityLog.entityId, issueId));
+      return { issue, comments, actions, activity };
+    }
+
+    it("leaves a done issue with a completed execution state untouched (HYBA-2941 shape)", async () => {
+      const { agentId, issueId, runId } = await seedInReviewParticipantRunFixture({
+        wakeReason: "execution_review_participant_recovery",
+        retryReason: "execution_review_participant_recovery",
+      });
+      await finishRecoveryRun(runId, { status: "cancelled", errorCode: "issue_reassigned" });
+      await db
+        .update(issues)
+        .set({
+          status: "done",
+          executionState: {
+            status: "completed",
+            currentStageId: null,
+            currentStageIndex: null,
+            currentStageType: null,
+            currentParticipant: null,
+            returnAssignee: null,
+            reviewRequest: null,
+            completedStageIds: [randomUUID()],
+            lastDecisionId: randomUUID(),
+            lastDecisionOutcome: "approved",
+          },
+        })
+        .where(eq(issues.id, issueId));
+
+      expect(await escalateReviewRecovery(issueId, runId)).toBeNull();
+
+      const { issue, comments, actions, activity } = await issueStatusAndComments(issueId);
+      expect(issue.status).toBe("done");
+      expect(comments.filter((c) => c.authorType === "system")).toEqual([]);
+      expect(actions).toEqual([]);
+      expect(
+        activity.some(
+          (event) =>
+            (event.details as Record<string, unknown> | null)?.source ===
+            "recovery.reconcile_execution_review_participant" &&
+            event.action === "issue.updated",
+        ),
+      ).toBe(false);
+      const skipped = activity.find((event) => event.action === "recovery.skipped_stale");
+      expect(skipped?.details).toMatchObject({
+        expectedStatus: "in_review",
+        currentStatus: "done",
+        latestRunAgentId: agentId,
+      });
+    });
+
+    it("does not block when the pending participant moved to another agent", async () => {
+      const { companyId, stageId, issueId, runId } = await seedInReviewParticipantRunFixture({
+        wakeReason: "execution_review_participant_recovery",
+        retryReason: "execution_review_participant_recovery",
+      });
+      await finishRecoveryRun(runId, { status: "failed", errorCode: "adapter_failed" });
+      const nextAgentId = randomUUID();
+      await db.insert(agents).values({
+        id: nextAgentId,
+        companyId,
+        name: "NextApprover",
+        role: "engineer",
+        status: "idle",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+      await db
+        .update(issues)
+        .set({
+          assigneeAgentId: nextAgentId,
+          executionState: {
+            status: "pending",
+            currentStageId: stageId,
+            currentStageIndex: 1,
+            currentStageType: "approval",
+            currentParticipant: { type: "agent", agentId: nextAgentId, userId: null },
+            returnAssignee: { type: "agent", agentId: nextAgentId, userId: null },
+            reviewRequest: null,
+            completedStageIds: [],
+            lastDecisionId: null,
+            lastDecisionOutcome: null,
+          },
+        })
+        .where(eq(issues.id, issueId));
+
+      expect(await escalateReviewRecovery(issueId, runId)).toBeNull();
+
+      const { issue, comments, actions, activity } = await issueStatusAndComments(issueId);
+      expect(issue.status).toBe("in_review");
+      expect(comments.filter((c) => c.authorType === "system")).toEqual([]);
+      expect(actions).toEqual([]);
+      expect(activity.some((event) => event.action === "recovery.skipped_stale")).toBe(true);
+    });
+
+    it("does not block when the issue status changed after the decision was taken", async () => {
+      const { issueId, runId } = await seedInReviewParticipantRunFixture({
+        wakeReason: "execution_review_participant_recovery",
+        retryReason: "execution_review_participant_recovery",
+      });
+      await finishRecoveryRun(runId, { status: "failed", errorCode: "adapter_failed" });
+      await db.update(issues).set({ status: "in_progress" }).where(eq(issues.id, issueId));
+
+      expect(await escalateReviewRecovery(issueId, runId)).toBeNull();
+
+      const { issue, comments } = await issueStatusAndComments(issueId);
+      expect(issue.status).toBe("in_progress");
+      expect(comments.filter((c) => c.authorType === "system")).toEqual([]);
+    });
+
+    it("still blocks when the pending participant's own recovery run failed (HYBA-2972 shape)", async () => {
+      const { issueId, runId } = await seedInReviewParticipantRunFixture({
+        wakeReason: "execution_review_participant_recovery",
+        retryReason: "execution_review_participant_recovery",
+      });
+      await finishRecoveryRun(runId, { status: "failed", errorCode: "adapter_failed" });
+
+      const updated = await escalateReviewRecovery(issueId, runId);
+      expect(updated?.status).toBe("blocked");
+
+      const { issue, actions, activity } = await issueStatusAndComments(issueId);
+      expect(issue.status).toBe("blocked");
+      expect(actions).toHaveLength(1);
+      expect(activity.some((event) => event.action === "recovery.skipped_stale")).toBe(false);
+    });
+
+    it("still blocks when the pending participant is in error and cannot be invoked", async () => {
+      const { agentId, issueId, runId } = await seedInReviewParticipantRunFixture();
+      await finishRecoveryRun(runId, { status: "failed", errorCode: "adapter_failed" });
+      await db.update(agents).set({ status: "error" }).where(eq(agents.id, agentId));
+
+      const updated = await escalateReviewRecovery(issueId, runId);
+      expect(updated?.status).toBe("blocked");
+    });
+  });
+
   it.each([
     ["failed", "adapter_failed"],
     ["failed", "process_lost"],

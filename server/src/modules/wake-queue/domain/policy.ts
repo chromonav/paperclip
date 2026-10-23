@@ -210,7 +210,32 @@ export type ReleaseRecoveryReviewParticipantFacts = {
   applies: boolean;
   /** True when the finishing run was itself a review-participant-recovery retry. */
   isExecutionReviewParticipantRecoveryRun: boolean;
+  /** Terminal status of the finishing run. */
+  finishingRunStatus: string;
+  /** Error code of the finishing run, when it has one. */
+  finishingRunErrorCode: string | null;
 };
+
+const REVIEW_RECOVERY_RELEASED_CANCEL_CODES = new Set(["issue_reassigned", "issue_assignee_changed"]);
+
+/**
+ * A review-participant recovery run counts as a failed recovery only when it
+ * failed or timed out, or was cancelled for a reason other than the issue
+ * moving to another participant. A run that succeeded chose its own
+ * disposition, and a run cancelled by a handoff has been overtaken by the
+ * next stage; neither is evidence that recovery failed.
+ */
+function isFailedReviewParticipantRecoveryRun(facts: ReleaseRecoveryReviewParticipantFacts): boolean {
+  if (!facts.isExecutionReviewParticipantRecoveryRun) return false;
+  switch (facts.finishingRunStatus) {
+    case "succeeded":
+      return false;
+    case "cancelled":
+      return !REVIEW_RECOVERY_RELEASED_CANCEL_CODES.has(facts.finishingRunErrorCode ?? "");
+    default:
+      return true;
+  }
+}
 
 export type ReleaseRecoveryImmediateFacts = {
   /** True when the issue is todo/in_progress, unassigned to a user, not hidden, still assigned to the finishing run's agent, and the run ended failed/timed_out/cancelled. */
@@ -391,9 +416,12 @@ export function decideReleaseRecovery(facts: ReleaseRecoveryFacts): ReleaseRecov
     const shouldBlock =
       !shared.recoveryAgentInvokable ||
       !shared.recoveryAgentPresent ||
-      reviewParticipant.isExecutionReviewParticipantRecoveryRun;
+      isFailedReviewParticipantRecoveryRun(reviewParticipant);
     if (shouldBlock) {
       return { kind: "blocked", notice: "execution_review_participant" };
+    }
+    if (reviewParticipant.isExecutionReviewParticipantRecoveryRun) {
+      return { kind: "released" };
     }
     return { kind: "queue_review_participant_recovery" };
   }

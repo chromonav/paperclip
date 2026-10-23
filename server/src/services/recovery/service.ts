@@ -3905,6 +3905,54 @@ export function recoveryService(
     return scheduled ? "queued" : "skipped";
   }
 
+  function reviewParticipantRecoveryStillApplies(
+    row: Pick<typeof issues.$inferSelect, "status" | "executionState">,
+    input: { previousStatus: StrandedPreviousStatus; latestRun: LatestIssueRun },
+  ) {
+    if (row.status !== input.previousStatus) return false;
+    const state = parseIssueExecutionState(row.executionState);
+    if (state?.status !== "pending") return false;
+    const participant = state.currentParticipant;
+    if (participant?.type !== "agent" || !participant.agentId) return false;
+    return !input.latestRun || participant.agentId === input.latestRun.agentId;
+  }
+
+  async function recordSkippedStaleReviewRecovery(input: {
+    issue: typeof issues.$inferSelect;
+    previousStatus: StrandedPreviousStatus;
+    latestRun: LatestIssueRun;
+    current: Pick<typeof issues.$inferSelect, "status" | "executionState"> | null;
+  }) {
+    const state = input.current
+      ? parseIssueExecutionState(input.current.executionState)
+      : null;
+    await logActivity(db, {
+      companyId: input.issue.companyId,
+      actorType: "system",
+      actorId: "system",
+      agentId: null,
+      runId: null,
+      action: "recovery.skipped_stale",
+      entityType: "issue",
+      entityId: input.issue.id,
+      details: {
+        identifier: input.issue.identifier,
+        source: "recovery.reconcile_execution_review_participant",
+        recoveryCause: "execution_review_participant_recovery",
+        expectedStatus: input.previousStatus,
+        currentStatus: input.current?.status ?? null,
+        currentExecutionStateStatus: state?.status ?? null,
+        currentParticipantAgentId:
+          state?.currentParticipant?.type === "agent"
+            ? state.currentParticipant.agentId
+            : null,
+        latestRunId: input.latestRun?.id ?? null,
+        latestRunAgentId: input.latestRun?.agentId ?? null,
+        latestRunStatus: input.latestRun?.status ?? null,
+      },
+    });
+  }
+
   async function escalateStrandedAssignedIssue(input: {
     issue: typeof issues.$inferSelect;
     previousStatus: StrandedPreviousStatus;
@@ -3926,6 +3974,27 @@ export function recoveryService(
       input.latestRun,
       input.recoveryCause,
     );
+    const isReviewParticipantRecovery =
+      recoveryCause === EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON;
+    if (isReviewParticipantRecovery) {
+      const fresh = await db
+        .select({
+          status: issues.status,
+          executionState: issues.executionState,
+        })
+        .from(issues)
+        .where(
+          and(
+            eq(issues.companyId, input.issue.companyId),
+            eq(issues.id, input.issue.id),
+          ),
+        )
+        .then((rows) => rows[0] ?? null);
+      if (!fresh || !reviewParticipantRecoveryStillApplies(fresh, input)) {
+        await recordSkippedStaleReviewRecovery({ ...input, current: fresh });
+        return null;
+      }
+    }
     const recoveryAction = await ensureSourceScopedStrandedRecoveryAction({
       issue: input.issue,
       previousStatus: input.previousStatus,
@@ -3949,10 +4018,62 @@ export function recoveryService(
       input.issue.companyId,
       input.issue.id,
     );
-    const updated = await issuesSvc.update(input.issue.id, {
-      status: "blocked",
-      blockedByIssueIds: blockerIds,
-    });
+    let updated: Awaited<ReturnType<typeof issuesSvc.update>> = null;
+    if (isReviewParticipantRecovery) {
+      const publications: ActivityPublication[] = [];
+      const postCommitActions: IssuePostCommitAction[] = [];
+      let staleRow: Pick<
+        typeof issues.$inferSelect,
+        "status" | "executionState"
+      > | null = null;
+      updated = await db.transaction(async (tx) => {
+        const locked = await tx
+          .select({
+            status: issues.status,
+            executionState: issues.executionState,
+          })
+          .from(issues)
+          .where(
+            and(
+              eq(issues.companyId, input.issue.companyId),
+              eq(issues.id, input.issue.id),
+            ),
+          )
+          .for("update")
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (!locked || !reviewParticipantRecoveryStillApplies(locked, input)) {
+          staleRow = locked;
+          return null;
+        }
+        return issuesSvc.update(
+          input.issue.id,
+          { status: "blocked", blockedByIssueIds: blockerIds },
+          tx,
+          publications,
+          postCommitActions,
+        );
+      });
+      if (!updated) {
+        await recoveryActionsSvc.resolveActiveForIssue({
+          companyId: input.issue.companyId,
+          sourceIssueId: input.issue.id,
+          actionId: recoveryAction.id,
+          status: "cancelled",
+          outcome: "cancelled",
+          resolutionNote: "stale_review_participant_recovery",
+        });
+        await recordSkippedStaleReviewRecovery({ ...input, current: staleRow });
+        return null;
+      }
+      for (const publication of publications) publishActivity(publication);
+      await executeIssuePostCommitActions(db, postCommitActions);
+    } else {
+      updated = await issuesSvc.update(input.issue.id, {
+        status: "blocked",
+        blockedByIssueIds: blockerIds,
+      });
+    }
     if (!updated) return null;
     if (isProviderQuotaWait) return updated;
     const sourceAssigneePreserved =

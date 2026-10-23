@@ -734,6 +734,87 @@ describe("releaseIssueExecution", () => {
   });
 });
 
+describe("releaseIssueExecution review-participant recovery runs", () => {
+  const REVIEW_RECOVERY_CONTEXT = {
+    wakeReason: "execution_review_participant_recovery",
+    retryReason: "execution_review_participant_recovery",
+  };
+  const pendingReviewIssue = (agentId: string): IssueSnapshot => ({
+    ...ISSUE,
+    status: "in_review",
+    assigneeAgentId: agentId,
+    executionState: {
+      status: "pending",
+      currentParticipant: { type: "agent", agentId },
+    } as IssueSnapshot["executionState"],
+  });
+
+  async function release(issue: IssueSnapshot, run: RunSnapshot) {
+    const transaction = createFakeTransaction({
+      findInvokableAgent: vi.fn(async () => ({ ...AGENT, id: run.agentId })),
+    });
+    const recovery = createFakeRecovery();
+    const releaseIssueExecution = createReleaseIssueExecution({
+      issueLock: createFakeIssueLock(createFakeHost(), transaction, issue, run),
+      recovery,
+    });
+    const result = await releaseIssueExecution({ companyId: run.companyId, runId: run.id, now: new Date() });
+    return { result, recovery };
+  }
+
+  it("releases without escalating when the recovery run was cancelled by a reassignment to the next stage", async () => {
+    const run = {
+      ...RUN,
+      agentId: "pulse",
+      status: "cancelled",
+      errorCode: "issue_reassigned",
+      contextSnapshot: REVIEW_RECOVERY_CONTEXT,
+    };
+    const { result, recovery } = await release(pendingReviewIssue("pulse"), run);
+    expect(result.outcome.kind).toBe("released");
+    expect(recovery.escalateStrandedAssignedIssue).not.toHaveBeenCalled();
+  });
+
+  it("releases without escalating when the recovery run succeeded", async () => {
+    const run = { ...RUN, agentId: "rez", status: "succeeded", contextSnapshot: REVIEW_RECOVERY_CONTEXT };
+    const { result, recovery } = await release(pendingReviewIssue("rez"), run);
+    expect(result.outcome.kind).toBe("released");
+    expect(recovery.escalateStrandedAssignedIssue).not.toHaveBeenCalled();
+  });
+
+  it("releases without escalating when the issue already moved on to done", async () => {
+    const run = {
+      ...RUN,
+      agentId: "pulse",
+      status: "cancelled",
+      errorCode: "issue_reassigned",
+      contextSnapshot: REVIEW_RECOVERY_CONTEXT,
+    };
+    const done = {
+      ...ISSUE,
+      status: "done",
+      executionState: { status: "completed", currentParticipant: null } as IssueSnapshot["executionState"],
+    };
+    const { result, recovery } = await release(done, run);
+    expect(result.outcome.kind).toBe("released");
+    expect(recovery.escalateStrandedAssignedIssue).not.toHaveBeenCalled();
+  });
+
+  it("releases without escalating when another participant now holds the pending stage", async () => {
+    const run = { ...RUN, agentId: "pulse", status: "failed", contextSnapshot: REVIEW_RECOVERY_CONTEXT };
+    const { result, recovery } = await release(pendingReviewIssue("axiom"), run);
+    expect(result.outcome.kind).toBe("released");
+    expect(recovery.escalateStrandedAssignedIssue).not.toHaveBeenCalled();
+  });
+
+  it.each(["failed", "timed_out"])("still blocks when the pending participant's recovery run %s", async (status) => {
+    const run = { ...RUN, agentId: "rez", status, contextSnapshot: REVIEW_RECOVERY_CONTEXT };
+    const { result, recovery } = await release(pendingReviewIssue("rez"), run);
+    expect(result.outcome.kind).toBe("blocked");
+    expect(recovery.escalateStrandedAssignedIssue).toHaveBeenCalledTimes(1);
+  });
+});
+
 const ACTIVE_EXECUTION_RUN: WakeAdmissionActiveExecutionRun = {
   id: "active-run-1",
   agentId: "execution-agent",
